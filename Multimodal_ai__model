@@ -1,0 +1,184 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import MinMaxScaler
+from copy import deepcopy as dc
+
+# Check device availability
+is_cuda = torch.cuda.is_available()
+device = torch.device("cuda" if is_cuda else "cpu")
+print("Using device:", device)
+
+# List of coin names
+coin_names = [
+    'AGI', 'BTC', 'ETH', 'LTC', 'XRP', 'DOGE', 'ADA', 'DOT', 'LINK',
+    'BCH', 'SOL', 'MATIC', 'TRX', 'XLM', 'AVAX', 'SHIB', 'FIL',
+    'VET', 'EOS', 'NEO', 'XTZ', 'ICP', 'SAND', 'MANA', 'ALGO',
+    # Add more coin names up to 40...
+]
+
+# Initialize an empty DataFrame to hold all data
+all_data = []
+
+# Iterate over each coin name
+for coin in coin_names:
+    # Construct the file path
+    file_path = f'/kaggle/input/multimodalai-prediction/public_dataset/train/price_data/{coin}.csv'
+    
+    # Read the CSV file
+    df = pd.read_csv(file_path)
+    
+    # Assuming the sentiment column is already present in the input data
+    if 'sentiment' in df.columns:
+        data = df[['datetime', 'close_x', 'sentiment']]
+        data['company'] = coin  # Add company name as a new column
+        
+        # Reorder columns to match desired output format
+        data = data[['company', 'datetime', 'close_x']]
+        
+        # Append to all_data list
+        all_data.append(data)
+
+# Concatenate all DataFrames in the list into a single DataFrame
+final_data = pd.concat(all_data, ignore_index=True)
+
+# Output to CSV file
+final_data.to_csv('/kaggle/working/combined_coin_data.csv', index=False)
+
+# Prepare for LSTM model training using one of the coins (e.g., AGI)
+df = final_data[final_data['company'] == 'AGI']
+data = df[['datetime', 'close_x']]
+data['Date'] = pd.to_datetime(data['datetime'])
+
+def prepare_dataframe_for_lstm(df, n_steps):
+    df = dc(df)
+    
+    df.set_index('Date', inplace=True)
+    
+    for i in range(1, n_steps + 1):
+        df[f'Close(t-{i})'] = df['close_x'].shift(i)
+        
+    df.dropna(inplace=True)
+    
+    return df
+
+lookback = 5
+shifted_df = prepare_dataframe_for_lstm(data, lookback)
+
+shifted_df_as_np = shifted_df.to_numpy()
+scaler = MinMaxScaler(feature_range=(-1, 1))
+shifted_df_as_np = scaler.fit_transform(shifted_df_as_np)
+
+X = shifted_df_as_np[:, 1:]
+X = dc(np.flip(X, axis=1))  # Flip according to time order
+y = shifted_df_as_np[:, 0]
+
+split_val_index = int(len(X) * 0.5)
+split_test_index = int(len(X) * 0.7)
+X_train, X_val, X_test = X[:split_val_index], X[split_val_index:split_test_index], X[split_test_index:]
+y_train, y_val, y_test = y[:split_val_index], y[split_val_index:split_test_index], y[split_test_index:]
+
+X_train = X_train.reshape((-1, lookback, 1))
+X_val = X_val.reshape((-1, lookback, 1))
+X_test = X_test.reshape((-1, lookback, 1))
+
+y_train = y_train.reshape((-1, 1))
+y_val = y_val.reshape((-1, 1))
+y_test = y_test.reshape((-1, 1))
+
+X_train, y_train = torch.tensor(X_train).float(), torch.tensor(y_train).float()
+X_val, y_val = torch.tensor(X_val).float(), torch.tensor(y_val).float()
+X_test, y_test = torch.tensor(X_test).float(), torch.tensor(y_test).float()
+
+class TimeSeriesDataset(Dataset):
+    def _init_(self, X, y):
+        self.X = X
+        self.y = y
+
+    def _len_(self):
+        return len(self.X)
+
+    def _getitem_(self, i):
+        return self.X[i], self.y[i]
+
+batch_size = 16
+train_loader = DataLoader(TimeSeriesDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(TimeSeriesDataset(X_val, y_val), batch_size=batch_size, shuffle=True)
+test_loader = DataLoader(TimeSeriesDataset(X_test, y_test), batch_size=batch_size, shuffle=False)
+
+input_size = 1  # at each time step, the model receives 1 feature as input
+hidden_size = 20
+num_stacked_layers = 2
+
+class LSTM(nn.Module):
+    def _init_(self):
+        super()._init_()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_stacked_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, 1)
+
+    def forward(self, x):
+        h0 = torch.zeros(num_stacked_layers, x.size(0), hidden_size).to(device)
+        c0 = torch.zeros(num_stacked_layers, x.size(0), hidden_size).to(device)
+        
+        out, _ = self.lstm(x, (h0, c0))
+        return self.fc(out[:, -1])
+
+model = LSTM().to(device)
+
+lr = 5e-4
+num_epochs = 30
+loss_function = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+train_losses, val_losses = [], []
+min_val_loss = float('inf')
+
+def train_one_epoch():
+    model.train()
+    running_loss = 0.0
+    
+    for x_batch, y_batch in train_loader:
+        x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+        
+        optimizer.zero_grad()
+        output = model(x_batch)
+        loss = loss_function(output, y_batch)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+
+    avg_loss_across_batches = running_loss / len(train_loader)
+    train_losses.append(avg_loss_across_batches)
+
+def validate_one_epoch(loader):
+    model.eval()
+    running_loss = 0.0
+    
+    with torch.no_grad():
+        for x_batch, y_batch in loader:
+            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+            output = model(x_batch)
+            loss = loss_function(output, y_batch)
+            running_loss += loss.item()
+
+    avg_loss_across_batches = running_loss / len(loader)
+    val_losses.append(avg_loss_across_batches)
+
+for epoch in range(num_epochs):
+    train_one_epoch()
+    validate_one_epoch(val_loader)
+
+plt.plot(train_losses,label='Train Loss')
+plt.plot(val_losses,label='Validation Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+plt.title('Train and Validation Loss')
+plt.show()
+
+# Save the final model if needed 
+torch.save(model.state_dict(), '/kaggle/working/LSTM_model_timeSeries.ckpt')
