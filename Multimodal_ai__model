@@ -13,12 +13,7 @@ device = torch.device("cuda" if is_cuda else "cpu")
 print("Using device:", device)
 
 # List of coin names
-coin_names = [
-    'AGI', 'BTC', 'ETH', 'LTC', 'XRP', 'DOGE', 'ADA', 'DOT', 'LINK',
-    'BCH', 'SOL', 'MATIC', 'TRX', 'XLM', 'AVAX', 'SHIB', 'FIL',
-    'VET', 'EOS', 'NEO', 'XTZ', 'ICP', 'SAND', 'MANA', 'ALGO',
-    # Add more coin names up to 40...
-]
+coin_names = [coins = ['ENJ','ETP','FUEL','GBP','HSC','KIN','KMD','LEND','MBL','NEST','NPXS','OCEAN','ONL','QUN','RSR','SFG','SWAP','TFUEL','TNT','UTK','WXT','XSR','YEE','YFII','ZEN','AGI','AUC','BCN','BNT','BZRX','CELR','CGLD','CHAT','CHR','CKB','DAI','DIA','DMG','DOTUP','DX']
 
 # Initialize an empty DataFrame to hold all data
 all_data = []
