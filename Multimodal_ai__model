@@ -175,5 +175,4 @@ plt.legend()
 plt.title('Train and Validation Loss')
 plt.show()
 
-# Save the final model if needed 
-torch.save(model.state_dict(), '/kaggle/working/LSTM_model_timeSeries.ckpt')
+
