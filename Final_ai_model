@@ -1,0 +1,146 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import MinMaxScaler
+from copy import deepcopy as dc
+
+# Check device availability
+is_cuda = torch.cuda.is_available()
+device = torch.device("cuda" if is_cuda else "cpu")
+print("Using device:", device)
+
+# Load data for all coins
+coin_names = [
+    'AGI', 'BTC', 'ETH', 'LTC', 'XRP', 'DOGE', 'ADA', 'DOT', 'LINK',
+    'BCH', 'SOL', 'MATIC', 'TRX', 'XLM', 'AVAX', 'SHIB', 'FIL',
+    'VET', 'EOS', 'NEO', 'XTZ', 'ICP', 'SAND', 'MANA', 'ALGO',
+    # Add more coin names up to 40...
+]
+
+# Initialize an empty DataFrame to hold all data
+all_data = []
+
+# Iterate over each coin name and load data
+for coin in coin_names:
+    file_path = f'/kaggle/input/multimodalai-prediction/public_dataset/train/price_data/{coin}.csv'
+    df = pd.read_csv(file_path)
+    
+    # Extract relevant columns and append to all_data list
+    data = df[['datetime', 'close_x']]
+    data['Date'] = data['datetime']
+    
+    # Prepare DataFrame for LSTM
+    lookback = 5
+    shifted_df = prepare_dataframe_for_lstm(data, lookback)
+    
+    all_data.append(shifted_df)
+
+# Concatenate all DataFrames into a single DataFrame
+final_data = pd.concat(all_data, ignore_index=True)
+
+# Prepare data for LSTM model training
+shifted_df_as_np = final_data.to_numpy()
+scaler = MinMaxScaler(feature_range=(-1, 1))
+shifted_df_as_np = scaler.fit_transform(shifted_df_as_np)
+
+X = shifted_df_as_np[:, 1:]
+X = dc(np.flip(X, axis=1))  # Flip according to time order
+y = shifted_df_as_np[:, 0]
+
+X = X.reshape((-1, lookback, 1))
+y = y.reshape((-1, 1))
+
+X = torch.tensor(X).float().to(device)
+y = torch.tensor(y).float().to(device)
+
+# Create Dataset and DataLoader for training on all data
+class TimeSeriesDataset(Dataset):
+    def _init_(self, X, y):
+        self.X = X
+        self.y = y
+
+    def _len_(self):
+        return len(self.X)
+
+    def _getitem_(self, i):
+        return self.X[i], self.y[i]
+
+train_dataset = TimeSeriesDataset(X, y)
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+
+# Define LSTM model architecture
+class LSTM(nn.Module):
+    def _init_(self, input_size=1, hidden_size=20, num_stacked_layers=2):
+        super()._init_()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_stacked_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, 1)
+
+    def forward(self, x):
+        h0 = torch.zeros(num_stacked_layers, x.size(0), hidden_size).to(device)
+        c0 = torch.zeros(num_stacked_layers, x.size(0), hidden_size).to(device)
+        
+        out, _ = self.lstm(x, (h0, c0))
+        return self.fc(out[:, -1])
+
+# Initialize model and training parameters
+model = LSTM().to(device)
+loss_function = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
+
+train_losses = []
+num_epochs = 30
+
+def train_one_epoch():
+    model.train()
+    running_loss = 0.0
+    
+    for batch in train_loader:
+        x_batch, y_batch = batch[0].to(device), batch[1].to(device)
+        
+        optimizer.zero_grad()
+        output = model(x_batch)
+        loss = loss_function(output, y_batch)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+
+    avg_loss_across_batches = running_loss / len(train_loader)
+    train_losses.append(avg_loss_across_batches)
+    print(f'Average train loss: {avg_loss_across_batches:.3f}')
+
+# Training loop
+for epoch in range(num_epochs):
+    print(f'Epoch: {epoch + 1}')
+    train_one_epoch()
+
+# Predictions on the entire dataset after training
+with torch.no_grad():
+    predictions = model(X).cpu().numpy()
+
+# Inverse transform predictions to original scale
+dummies = np.zeros((X.shape[0], lookback + 1))
+dummies[:, 0] = predictions.flatten()
+dummies = scaler.inverse_transform(dummies)
+
+predictions_in_original_scale = dummies[:, 0]
+
+# Plotting results
+plt.plot(final_data['close_x'].values[lookback:], label='Actual Close')
+plt.plot(predictions_in_original_scale, label='Predicted Close')
+plt.xlabel('Day')
+plt.ylabel('Close')
+plt.title('Prediction on Entire Dataset')
+plt.legend()
+plt.show()
+
+# Plotting training losses
+plt.plot(train_losses, label='Train Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+plt.title('Training Loss Over Epochs')
+plt.show()
